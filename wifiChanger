@@ -1,0 +1,283 @@
+#include <DNSServer.h>
+#ifdef ESP32
+#include <WiFi.h>
+#include "time.h" //time stuff
+#include <AsyncTCP.h>
+#include <SPIFFS.h>
+  
+#include "functiontimers.hpp"
+Timer timer;
+
+
+#elif defined(ESP8266)
+#include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+#endif
+#include "ESPAsyncWebServer.h"
+
+ char ssid     [32]  = "YOUR_SSID";
+ char password   [32] = "YOUR_PASS";
+char ssidArray [32];
+
+String connectionStatis = "not Tested";
+String fontcolor = "blue";
+
+#include "dayMillis.h" 
+
+//time globals
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = -21600-3600; //mt - daylightSavings
+const int   daylightOffset_sec = 0; //day light savings 0 or 3600// didn't work
+
+void printLocalTime() { struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+    return;} 
+   time_t someTime = mktime(&timeinfo);
+    String times = ctime(&someTime);
+   // Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S"); 
+    Serial.println(times);
+    connectionStatis = "Connected!";
+  fontcolor = "green";
+    
+    }
+    //time globals
+//captive portal
+DNSServer dnsServer;
+AsyncWebServer server(80);
+
+const char HTML[] PROGMEM = "<form   action=\"/hello\" ><label class=\"label\">Network Name</label><input type=\"text\" name=\"ssid\"/><br/><label>Password</label><input type=\"text\" name=\"pass\"/><br/><input type=\"submit\" value=\"Submit\"></form>";
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html><head>
+  <title>ESP Input Form</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    function submitMessage() {
+      alert("Saved value to ESP SPIFFS");
+      setTimeout(function(){ document.location.reload(false); }, 500);  //this is why we reload the same page  
+    }
+  </script></head><body>
+  <form action="/post" target="hidden-form" method="post">
+    wifi name (current value %wifi%): <input type="text" name="wifi">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  <form action="/post" target="hidden-form" method="post">
+    wifi password (current value %password%): <input type="text" name="password">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  current time = %time%
+
+  <iframe style="display:none" name="hidden-form"></iframe>
+  <br> <p style="color:%fontcolor%">%connectionStatis%</p>
+
+</body></html>
+)rawliteral";
+
+
+void notFound(AsyncWebServerRequest *request) {
+  request->send(404, "text/plain", "Not found");
+}
+
+String readFile(fs::FS &fs, const char * path){
+  Serial.printf("Reading file: %s\r\n", path);
+  File file = fs.open(path, "r");
+  if(!file || file.isDirectory()){
+    Serial.println("- empty file or failed to open file");
+    return String();
+  }
+  Serial.println("- read from file:");
+  String fileContent;
+  while(file.available()){
+    fileContent+=String((char)file.read());
+  }
+  Serial.println(fileContent);
+  return fileContent;
+}
+
+void writeFile(fs::FS &fs, const char * path, const char * message){
+  Serial.printf("Writing file: %s\r\n", path);
+  File file = fs.open(path, "w");
+  if(!file){
+    Serial.println("- failed to open file for writing");
+    return;
+  }
+  if(file.print(message)){
+    Serial.println("- file written");
+  } else {
+    Serial.println("- write failed");
+  }
+}
+
+// Replaces placeholder with stored values
+String processor(const String& var){
+  //Serial.println(var);
+  if(var == "wifi"){
+  String tempString =  readFile(SPIFFS, "/wifi.txt");
+  tempString.toCharArray(ssid,tempString.length()+1);
+    return ssid;
+  }
+  else if(var == "password"){
+      String tempString =  readFile(SPIFFS, "/password.txt");
+    tempString.toCharArray(password,tempString.length()+1);
+    return tempString;
+  }  else if(var == "time"){
+    return readFile(SPIFFS, "/time.txt");
+  } else if(var == "fontcolor"){
+    return fontcolor;
+  }else if(var == "connectionStatis"){
+    return connectionStatis;
+  }
+
+  return String();
+}
+
+
+class CaptiveRequestHandler : public AsyncWebHandler {
+public:
+  CaptiveRequestHandler() {
+      server.on("/hello", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", "Hello World");
+  });
+
+   server.on("/index", HTTP_ANY, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html, processor);
+  });
+
+  // Send a GET request to <ESP_IP>/get?inputString=<inputMessage>
+  server.on("/post", HTTP_ANY, [] (AsyncWebServerRequest *request) {
+    String inputMessage;
+    // GET inputString value on <ESP_IP>/get?inputString=<inputMessage>
+    if (request->hasParam("wifi", true)) {
+      inputMessage = request->getParam("wifi", true)->value();
+      writeFile(SPIFFS, "/wifi.txt", inputMessage.c_str());
+    }
+    // GET inputInt value on <ESP_IP>/get?inputInt=<inputMessage>
+    else if (request->hasParam("password", true)) {
+      inputMessage = request->getParam("password", true)->value();
+      writeFile(SPIFFS, "/password.txt", inputMessage.c_str());
+    }
+    // GET inputFloat value on <ESP_IP>/get?inputFloat=<inputMessage>
+  
+    else {
+      inputMessage = "No message sent";
+    }
+    Serial.println(inputMessage);
+    request->send(200, "text/text", inputMessage);
+  });
+  
+  server.onNotFound(notFound);
+
+  
+    }
+  virtual ~CaptiveRequestHandler() {}
+
+  bool canHandle(AsyncWebServerRequest *request){
+    //request->addInterestingHeader("ANY");
+    return true;
+  }
+
+  void handleRequest(AsyncWebServerRequest *request) {
+    
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html><head><title>Captive Portal</title></head><body>");
+    response->print("<p>This is out captive portal front page.</p>");
+    response->printf("<p>You were trying to reach: http://%s%s</p>", request->host().c_str(), request->url().c_str());
+    response->printf("<p>Try opening <a href='http://%s", WiFi.softAPIP().toString().c_str() );
+    response->printf("/index'>this link</a> instead</p>");
+    response->print("</body></html>");
+    request->send(response); 
+  //  request->send_P(200, "text/html", index_html, processor);
+
+  }
+};
+
+
+void setup(){
+
+  
+  Serial.begin(115200);
+
+      if(!SPIFFS.begin(true)){
+      Serial.println("An Error has occurred while mounting SPIFFS");
+      return;
+    }
+    
+      String tempString =  readFile(SPIFFS, "/wifi.txt");
+  tempString.toCharArray(ssid,tempString.length()+1);
+     tempString =  readFile(SPIFFS, "/password.txt");
+  tempString.toCharArray(password,tempString.length()+1);
+
+  Serial.println(password);
+  
+  //your other setup stuff...
+  WiFi.softAP("esp-captive");
+  
+  WiFi.mode(WIFI_MODE_APSTA);//from soft ap and station
+
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  
+  server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);//only when requested from AP
+  
+  
+  //more handlers...
+  server.begin();
+}
+
+void loop(){
+  timer.currentTime(millis());
+
+  dnsServer.processNextRequest();
+
+
+  static uint16_t  printWifi;
+   if(timer.timePassed16(printWifi,10000)){
+
+    String yourWifi = readFile(SPIFFS, "/wifi.txt");
+  Serial.print("*** Your yourWifi: ");
+  Serial.println(yourWifi);
+  
+  String yourPassword = readFile(SPIFFS, "/password.txt");
+  Serial.print("*** Your yourPassword: ");
+  Serial.println(yourPassword);
+  
+  String yourTime = readFile(SPIFFS, "/time.txt");
+  Serial.print("*** Your yourTime: ");
+  Serial.println(yourTime);
+  delay(3000);
+   }
+
+     static uint16_t  tryConnection;
+   if(timer.timePassed16(tryConnection,3000)){
+
+ Serial.printf("Connecting to %s ", ssid);
+  WiFi.begin(ssid, password);
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+      connectionStatis = "Not Connected :(";
+fontcolor = "red";
+  }// else { //this doesnt work
+  
+   if (WiFi.status() == WL_CONNECTED) { 
+  Serial.println(" CONNECTED");
+  Serial.println(" CONNECTED");
+  Serial.println(" CONNECTED");
+
+  //this isnt happening!!!!
+  connectionStatis = "Connected!";
+  fontcolor = "green";
+
+  }
+   
+   Serial.print(" wifi status == ");
+   Serial.println(WiFi.status() );
+   
+
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  printLocalTime();
+   }
+   WiFi.disconnect(true);
+}
